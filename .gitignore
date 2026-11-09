@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Fichiers générés
+*.pdf
+conducteur_animateur.txt

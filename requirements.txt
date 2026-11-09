@@ -1,0 +1,2 @@
+spotipy>=2.24
+reportlab>=4.0
