@@ -130,10 +130,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prefixe", default=None,
                         help="Préfixe des fichiers générés. Défaut : date de l'export "
                              "(AAAA-MM-JJ).")
-    parser.add_argument("--title", default=None,
+    parser.add_argument("--title", dest="pdf_title", default=None,
                         help="Titre affiché sous l'en-tête de chaque grille. "
                              "Absent : aucun titre.")
-    parser.add_argument("--footer", default=None,
+    parser.add_argument("--footer", dest="pdf_footer", default=None,
                         help="Texte affiché en bas de chaque grille. "
                              "Absent : aucun texte.")
     args = parser.parse_args(argv)
@@ -222,15 +222,29 @@ _VERSION_WORDS = (r"remaster\w*|live|version|edit|mix|remix|mono|stereo|feat\.?|
                   r"unplugged|extended|original|bande originale|from\b|soundtrack")
 _VERSION_DASH = re.compile(rf"\s+-\s+.*\b(?:{_VERSION_WORDS}).*$", re.IGNORECASE)
 
+# Mentions de remasterisation retirées du libellé imprimé : « - Remastered 2021 »,
+# « - 2011 Remaster », « (Remastered 2009) », « [2015 Remaster] »…
+_REMASTER_DASH = re.compile(r"\s+-\s+[^-]*\bremaster\w*[^-]*?(?=\s+-\s+|\s*$)",
+                            re.IGNORECASE)
+_REMASTER_BRACKETED = re.compile(r"\s*[(\[][^()\[\]]*\bremaster\w*[^()\[\]]*[)\]]",
+                                 re.IGNORECASE)
+
+
+def strip_remaster(song_title: str) -> str:
+    """Retire les indications de remasterisation d'un titre (pour l'affichage)."""
+    cleaned = _REMASTER_BRACKETED.sub("", song_title)
+    cleaned = _REMASTER_DASH.sub("", cleaned).strip()
+    return cleaned or song_title
+
 
 def _simplify(text: str) -> str:
     """Casse, accents et ponctuation retirés."""
-    t = unicodedata.normalize("NFKD", text.casefold())
-    t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    return re.sub(r"[^\w]+", " ", t).strip()
+    folded = unicodedata.normalize("NFKD", text.casefold())
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return re.sub(r"[^\w]+", " ", folded).strip()
 
 
-def normalize_title(title: str) -> str:
+def normalize_song_title(song_title: str) -> str:
     """
     Partie « titre » de la clé de dédoublonnage : sans casse, accents,
     ponctuation, ni rien de ce qui est entre parenthèses / crochets, ni mention
@@ -238,18 +252,18 @@ def normalize_title(title: str) -> str:
     « Bohémian rhapsody (Live) » et « Bohemian Rhapsody [Acoustic] » donnent
     la même clé. Le libellé imprimé sur les grilles, lui, reste intact.
     """
-    t = title
+    cleaned = song_title
     while True:  # de l'intérieur vers l'extérieur : « (Live (2011)) »
-        stripped = _BRACKETED.sub(" ", t)
-        if stripped == t:
+        stripped = _BRACKETED.sub(" ", cleaned)
+        if stripped == cleaned:
             break
-        t = stripped
-    t = _VERSION_DASH.sub("", _UNCLOSED.sub("", t))
+        cleaned = stripped
+    cleaned = _VERSION_DASH.sub("", _UNCLOSED.sub("", cleaned))
     # Titre entièrement entre parenthèses (« (Untitled) ») : on garde son contenu.
-    return _simplify(t) or _simplify(title) or title.casefold().strip()
+    return _simplify(cleaned) or _simplify(song_title) or song_title.casefold().strip()
 
 
-def track_key(artist: str, title: str) -> tuple[str, str]:
+def track_key(song_artist: str, song_title: str) -> tuple[str, str]:
     """
     Clé de dédoublonnage : le binôme (artiste principal, titre normalisé).
     Seul le premier artiste crédité compte : Spotify ajoute ou retire les
@@ -257,7 +271,7 @@ def track_key(artist: str, title: str) -> tuple[str, str]:
     Cooper »). « Toto - Africa » et sa reprise « Weezer - Africa » restent
     deux morceaux distincts.
     """
-    return _simplify(artist), normalize_title(title)
+    return _simplify(song_artist), normalize_song_title(song_title)
 
 
 def merge_tracks(sources: list[list[tuple[str, str, str]]]) -> tuple[list[str], int]:
@@ -272,8 +286,8 @@ def merge_tracks(sources: list[list[tuple[str, str, str]]]) -> tuple[list[str], 
     merged: list[str] = []
     duplicates = 0
     for source in sources:
-        for label, artist, title in source:
-            key = track_key(artist, title)
+        for label, song_artist, song_title in source:
+            key = track_key(song_artist, song_title)
             if key in seen:
                 duplicates += 1
                 continue
@@ -367,20 +381,20 @@ def build_requests_session():
     return session
 
 
-def read_playlist(sp, playlist_id: str, me: dict | None,
+def read_playlist(spotify, playlist_id: str, current_user: dict | None,
                   access_hint: str) -> tuple[str, list[tuple[str, str, str]]]:
     """Lit une playlist : (nom, [(« Artiste - Titre », artiste principal, titre), …])."""
-    meta = sp.playlist(playlist_id)
+    meta = spotify.playlist(playlist_id)
     name = meta.get("name") or playlist_id
 
-    if me is not None:
+    if current_user is not None:
         owner_id = (meta.get("owner") or {}).get("id")
-        if owner_id != me["id"] and not meta.get("collaborative"):
+        if owner_id != current_user["id"] and not meta.get("collaborative"):
             print(f"⚠️  « {name} » appartient à « {owner_id} », pas à vous : "
                   f"son contenu risque d'être refusé. {access_hint}", file=sys.stderr)
 
-    # La pagination est gérée par sp.next() (100 morceaux par page).
-    page = sp.playlist_items(playlist_id, additional_types=("track",), limit=100)
+    # La pagination est gérée par spotify.next() (100 morceaux par page).
+    page = spotify.playlist_items(playlist_id, additional_types=("track",), limit=100)
     if page is None or "items" not in page:
         fail(f"Spotify n'a pas renvoyé le contenu de « {name} ». {access_hint}")
 
@@ -392,11 +406,12 @@ def read_playlist(sp, playlist_id: str, me: dict | None,
             # On ignore les entrées vides, locales ou les épisodes de podcast.
             if not track or track.get("type") != "track" or not track.get("name"):
                 continue
-            names = [a["name"] for a in track.get("artists", []) if a.get("name")]
+            names = [artist["name"] for artist in track.get("artists", []) if artist.get("name")]
             artists = ", ".join(names)
-            label = f"{artists} - {track['name']}" if artists else track["name"]
-            entries.append((label, names[0] if names else "", track["name"]))
-        page = sp.next(page) if page.get("next") else None
+            song_title = strip_remaster(track["name"])
+            label = f"{artists} - {song_title}" if artists else song_title
+            entries.append((label, names[0] if names else "", song_title))
+        page = spotify.next(page) if page.get("next") else None
     return name, entries
 
 
@@ -411,8 +426,8 @@ def fetch_playlists_tracks(args: argparse.Namespace) -> tuple[list[str], list[st
         fail("la bibliothèque 'spotipy' est absente. Lancez : pip install -r requirements.txt")
 
     # Une même playlist passée deux fois n'est lue qu'une fois (ordre conservé).
-    playlist_ids = list(dict.fromkeys(extract_playlist_id(p) for p in args.playlist))
-    sp = build_spotify_client(args)
+    playlist_ids = list(dict.fromkeys(extract_playlist_id(playlist_ref) for playlist_ref in args.playlist))
+    spotify = build_spotify_client(args)
     access_hint = ("Spotify ne livre le contenu d'une playlist qu'à son propriétaire "
                    "ou à un collaborateur (applications en mode développement). "
                    "Connectez-vous avec le compte propriétaire, ou copiez les morceaux "
@@ -422,14 +437,14 @@ def fetch_playlists_tracks(args: argparse.Namespace) -> tuple[list[str], list[st
     sources: list[list[tuple[str, str, str]]] = []
     current = playlist_ids[0]  # playlist en cours, pour situer une erreur
     try:
-        me = None
+        current_user = None
         if args.auth == "user":
             # Déclenche la connexion OAuth au premier lancement (puis cache).
-            me = sp.current_user()
-            print(f"   Connecté en tant que {me.get('display_name') or me['id']}.")
+            current_user = spotify.current_user()
+            print(f"   Connecté en tant que {current_user.get('display_name') or current_user['id']}.")
 
         for current in playlist_ids:
-            name, entries = read_playlist(sp, current, me, access_hint)
+            name, entries = read_playlist(spotify, current, current_user, access_hint)
             names.append(name)
             sources.append(entries)
             print(f"   « {name} » : {len(entries)} morceau(x).")
@@ -573,8 +588,8 @@ def fit_paragraph(text: str, style, width: float, height: float,
         font_size -= 0.5
 
 
-def build_pdf(grids, size: int, output: Path, title: str | None = None,
-              footer: str | None = None) -> None:
+def build_pdf(grids, grid_size: int, pdf_path: Path, pdf_title: str | None = None,
+              pdf_footer: str | None = None) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
@@ -588,7 +603,7 @@ def build_pdf(grids, size: int, output: Path, title: str | None = None,
 
     page_w, page_h = A4
     margin = 15 * mm
-    doc = SimpleDocTemplate(str(output), pagesize=A4,
+    doc = SimpleDocTemplate(str(pdf_path), pagesize=A4,
                             leftMargin=margin, rightMargin=margin,
                             topMargin=margin, bottomMargin=margin,
                             title="Bingo musical", author="bingo_musical.py")
@@ -597,35 +612,35 @@ def build_pdf(grids, size: int, output: Path, title: str | None = None,
     # (en réservant ~45 mm de hauteur pour le titre et le pied de page).
     avail_w = page_w - 2 * margin
     avail_h = page_h - 2 * margin - 45 * mm
-    cell = min(avail_w, avail_h) / size
-    padding = max(2.0, cell * 0.06)
-    inner = cell - 2 * padding - 1  # surface utile pour le texte
+    cell_side = min(avail_w, avail_h) / grid_size
+    padding = max(2.0, cell_side * 0.06)
+    inner = cell_side - 2 * padding - 1  # surface utile pour le texte
 
     # Taille de police de départ proportionnelle à la cellule ;
     # fit_paragraph la réduit au besoin cellule par cellule.
-    base_font = max(6.0, min(14.0, cell / 6.5))
+    base_font = max(6.0, min(14.0, cell_side / 6.5))
 
-    title_style = ParagraphStyle("title", fontName=font_bold, fontSize=22,
+    heading_style = ParagraphStyle("title", fontName=font_bold, fontSize=22,
                                  leading=26, alignment=TA_CENTER, spaceAfter=4)
-    subtitle_style = ParagraphStyle("subtitle", fontName=font, fontSize=11,
+    pdf_title_style = ParagraphStyle("subtitle", fontName=font, fontSize=11,
                                     leading=14, alignment=TA_CENTER,
                                     textColor=colors.HexColor("#555555"))
-    cell_style = ParagraphStyle("cell", fontName=font, alignment=TA_CENTER,
+    cell_text_style = ParagraphStyle("cell", fontName=font, alignment=TA_CENTER,
                                 textColor=colors.HexColor("#1a1a1a"))
     free_style = ParagraphStyle("free", fontName=font_bold, alignment=TA_CENTER,
                                 textColor=colors.white)
-    footer_style = ParagraphStyle("footer", fontName=font, fontSize=9,
+    pdf_footer_style = ParagraphStyle("footer", fontName=font, fontSize=9,
                                   alignment=TA_CENTER,
                                   textColor=colors.HexColor("#777777"))
 
     header_color = colors.HexColor("#2b2d42")
     story = []
-    center = size // 2 if size % 2 == 1 else None
+    center = grid_size // 2 if grid_size % 2 == 1 else None
 
     for index, grid in enumerate(grids, start=1):
-        story.append(Paragraph(f"BINGO MUSICAL — Grille n°{index}", title_style))
-        if title:
-            story.append(Paragraph(escape(title), subtitle_style))
+        story.append(Paragraph(f"BINGO MUSICAL — Grille n°{index}", heading_style))
+        if pdf_title:
+            story.append(Paragraph(escape(pdf_title), pdf_title_style))
         story.append(Spacer(1, 8 * mm))
 
         data = []
@@ -637,16 +652,16 @@ def build_pdf(grids, size: int, output: Path, title: str | None = None,
                                               inner, inner, base_font * 1.3))
                 else:
                     # Artiste en gras, titre en dessous : plus lisible pendant le jeu.
-                    artist, _, title = value.partition(" - ")
-                    text = (f"<b>{escape(artist)}</b><br/>{escape(title)}"
-                            if title else escape(artist))
+                    cell_artist, _, cell_song_title = value.partition(" - ")
+                    text = (f"<b>{escape(cell_artist)}</b><br/>{escape(cell_song_title)}"
+                            if cell_song_title else escape(cell_artist))
                     if font_bold != font:
                         text = text.replace("<b>", f'<font name="{font_bold}">') \
                                    .replace("</b>", "</font>")
-                    line.append(fit_paragraph(text, cell_style, inner, inner, base_font))
+                    line.append(fit_paragraph(text, cell_text_style, inner, inner, base_font))
             data.append(line)
 
-        table = Table(data, colWidths=[cell] * size, rowHeights=[cell] * size)
+        table = Table(data, colWidths=[cell_side] * grid_size, rowHeights=[cell_side] * grid_size)
         style_cmds = [
             ("GRID", (0, 0), (-1, -1), 1.2, header_color),
             ("BOX", (0, 0), (-1, -1), 2.5, header_color),
@@ -666,9 +681,9 @@ def build_pdf(grids, size: int, output: Path, title: str | None = None,
         table.setStyle(TableStyle(style_cmds))
         story.append(table)
 
-        if footer:
+        if pdf_footer:
             story.append(Spacer(1, 6 * mm))
-            story.append(Paragraph(escape(footer), footer_style))
+            story.append(Paragraph(escape(pdf_footer), pdf_footer_style))
         if index < len(grids):
             story.append(PageBreak())
 
@@ -694,7 +709,7 @@ def write_conductor(tracks: list[str], output: Path, playlist_names: list[str],
         "Jouez les morceaux dans cet ordre et cochez au fur et à mesure.",
         "",
     ]
-    lines += [f"[ ] {i:>{width}}. {t}" for i, t in enumerate(order, start=1)]
+    lines += [f"[ ] {i:>{width}}. {track}" for i, track in enumerate(order, start=1)]
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -708,7 +723,7 @@ def open_output_folder(files: list[Path]) -> None:
     (une fois par dossier). Windows : l'Explorateur avec le premier fichier
     sélectionné ; macOS : le Finder ; Linux : xdg-open. Un échec est sans gravité.
     """
-    folders = list(dict.fromkeys(f.resolve().parent for f in files))
+    folders = list(dict.fromkeys(file.resolve().parent for file in files))
     try:
         if sys.platform == "win32":
             first = files[0].resolve()
@@ -727,7 +742,7 @@ def open_output_folder(files: list[Path]) -> None:
             return
     except OSError:
         return
-    print(f"📂 Dossier ouvert : {', '.join(str(f) for f in folders)}")
+    print(f"📂 Dossier ouvert : {', '.join(str(folder) for folder in folders)}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -751,7 +766,7 @@ def main(argv: list[str] | None = None) -> int:
         fail(f"impossible de créer le dossier {export_dir} : {exc}")
     pdf_path = export_dir / f"{prefix}_{Path(args.output).name}"
     try:
-        build_pdf(grids, args.size, pdf_path, args.title, args.footer)
+        build_pdf(grids, args.size, pdf_path, args.pdf_title, args.pdf_footer)
     except ImportError:
         fail("la bibliothèque 'reportlab' est absente. Lancez : pip install reportlab")
     except OSError as exc:
