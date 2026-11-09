@@ -37,6 +37,7 @@ import sys
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 from xml.sax.saxutils import escape
 
 # --------------------------------------------------------------------------- #
@@ -99,7 +100,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default=None,
                         help="Fichier YAML contenant un bloc « spotify: » (client_id, "
                              "client_secret, redirect_uri, open_browser) — le même format "
-                             "que le config.yml de spotify-tidal-sync.")
+                             "que le config.yml de spotify-tidal-sync. Sans cette option, "
+                             "cherche ./config.yml puis ../spotify_to_tidal/config.yml.")
     # Authentification
     parser.add_argument("--auth", choices=("user", "app"), default="user",
                         help="user : connexion de votre compte Spotify (OAuth, défaut) ; "
@@ -122,7 +124,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
 
     # Fusion des sources : ligne de commande > environnement > fichier > défaut.
-    conf = load_spotify_config(args.config, parser) if args.config else {}
+    config_path = args.config or find_default_config()
+    conf = load_spotify_config(config_path, parser) if config_path else {}
     args.client_id = (args.client_id or os.environ.get("SPOTIPY_CLIENT_ID")
                       or conf.get("client_id"))
     args.client_secret = (args.client_secret or os.environ.get("SPOTIPY_CLIENT_SECRET")
@@ -141,6 +144,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not MIN_SIZE <= args.size <= MAX_SIZE:
         parser.error(f"--size doit être compris entre {MIN_SIZE} et {MAX_SIZE}.")
     return args
+
+
+def find_default_config() -> Optional[str]:
+    """Premier fichier de config existant parmi les emplacements habituels."""
+    here = Path(__file__).resolve().parent
+    for candidate in (here / "config.yml", here.parent / "spotify_to_tidal" / "config.yml"):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def load_spotify_config(path: str, parser: argparse.ArgumentParser) -> dict:
