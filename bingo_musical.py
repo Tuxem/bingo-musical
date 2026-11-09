@@ -6,9 +6,10 @@ Produit :
   1. un PDF multipage prêt à imprimer (une grille unique par page) ;
   2. un conducteur .txt pour l'animateur (tous les morceaux, ordre mélangé).
 
-Exemple :
+Exemple (une ou plusieurs playlists, mélangées en un seul répertoire) :
     python bingo_musical.py \
-        --playlist "https://open.spotify.com/playlist/XXXXXXXXXXXXXXXXXXXXXX" \
+        --playlist "https://open.spotify.com/playlist/AAAAAAAAAAAAAAAAAAAAAA" \
+                   "https://open.spotify.com/playlist/BBBBBBBBBBBBBBBBBBBBBB" \
         --cards 30 --size 5 \
         --client_id "VOTRE_CLIENT_ID" --client_secret "VOTRE_CLIENT_SECRET"
 
@@ -33,6 +34,7 @@ import os
 import random
 import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -79,8 +81,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Génère des grilles de bingo musical (PDF) depuis une playlist Spotify.",
     )
-    parser.add_argument("--playlist", required=True,
-                        help="URL (ou URI / ID) de la playlist Spotify.")
+    parser.add_argument("--playlist", required=True, nargs="+", action="extend",
+                        metavar="PLAYLIST",
+                        help="URL (ou URI / ID) d'une ou plusieurs playlists Spotify, "
+                             "séparées par des espaces ou en répétant --playlist. "
+                             "Les morceaux sont mélangés, chaque titre n'est gardé qu'une fois.")
     parser.add_argument("--cards", required=True, type=int,
                         help="Nombre de grilles uniques à générer.")
     parser.add_argument("--size", type=int, default=5,
@@ -178,6 +183,49 @@ def extract_playlist_id(playlist: str) -> str:
     return ""  # inatteignable, pour les vérificateurs de type
 
 
+# Segments de version qui ne changent pas l'identité d'un morceau :
+# « Titre - Remastered 2011 », « Titre (Live) », « Titre [feat. X] »…
+_VERSION_WORDS = (r"remaster\w*|live|version|edit|mix|remix|mono|stereo|feat\.?|ft\.?|"
+                  r"featuring|acoustic|acoustique|deluxe|bonus|radio|single|demo|instrumental|"
+                  r"unplugged|extended|original|bande originale|from\b|soundtrack")
+_VERSION_BRACKETS = re.compile(rf"[(\[][^)\]]*\b(?:{_VERSION_WORDS})[^)\]]*[)\]]", re.IGNORECASE)
+_VERSION_DASH = re.compile(rf"\s+-\s+.*\b(?:{_VERSION_WORDS}).*$", re.IGNORECASE)
+
+
+def normalize_title(title: str) -> str:
+    """
+    Clé de dédoublonnage d'un morceau : son TITRE, sans casse, accents,
+    ponctuation ni mention de version. « Bohemian Rhapsody - Remastered 2011 »
+    et « Bohémian rhapsody (Live) » donnent la même clé.
+    """
+    t = _VERSION_DASH.sub("", _VERSION_BRACKETS.sub("", title))
+    t = unicodedata.normalize("NFKD", t.casefold())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = re.sub(r"[^\w]+", " ", t).strip()
+    return t or title.casefold().strip()  # titre fait uniquement de symboles
+
+
+def merge_tracks(sources: list[list[tuple[str, str]]]) -> tuple[list[str], int]:
+    """
+    Fusionne les morceaux de plusieurs playlists, (libellé, titre) chacun.
+    Un titre déjà vu (même nom, cf. normalize_title) n'est gardé qu'une fois :
+    la première occurrence l'emporte, dans l'ordre des playlists.
+    Renvoie (libellés retenus, nombre de doublons écartés).
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    duplicates = 0
+    for source in sources:
+        for label, title in source:
+            key = normalize_title(title)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            merged.append(label)
+    return merged, duplicates
+
+
 def build_spotify_client(args: argparse.Namespace):
     """Construit le client spotipy selon le mode d'authentification choisi."""
     import spotipy
@@ -248,56 +296,71 @@ def build_requests_session():
     return session
 
 
-def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
-    """Renvoie (nom de la playlist, liste « Artiste - Titre » sans doublons)."""
+def read_playlist(sp, playlist_id: str, me: dict | None,
+                  access_hint: str) -> tuple[str, list[tuple[str, str]]]:
+    """Lit une playlist : (nom, [(« Artiste - Titre », titre), …])."""
+    meta = sp.playlist(playlist_id)
+    name = meta.get("name") or playlist_id
+
+    if me is not None:
+        owner_id = (meta.get("owner") or {}).get("id")
+        if owner_id != me["id"] and not meta.get("collaborative"):
+            print(f"⚠️  « {name} » appartient à « {owner_id} », pas à vous : "
+                  f"son contenu risque d'être refusé. {access_hint}", file=sys.stderr)
+
+    # La pagination est gérée par sp.next() (100 morceaux par page).
+    page = sp.playlist_items(playlist_id, additional_types=("track",), limit=100)
+    if page is None or "items" not in page:
+        fail(f"Spotify n'a pas renvoyé le contenu de « {name} ». {access_hint}")
+
+    entries: list[tuple[str, str]] = []
+    while page:
+        for entry in page.get("items", []):
+            # « item » (nommage depuis 2026) ou « track » (historique).
+            track = entry.get("item") or entry.get("track")
+            # On ignore les entrées vides, locales ou les épisodes de podcast.
+            if not track or track.get("type") != "track" or not track.get("name"):
+                continue
+            artists = ", ".join(a["name"] for a in track.get("artists", []) if a.get("name"))
+            label = f"{artists} - {track['name']}" if artists else track["name"]
+            entries.append((label, track["name"]))
+        page = sp.next(page) if page.get("next") else None
+    return name, entries
+
+
+def fetch_playlists_tracks(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+    """
+    Lit toutes les playlists demandées et fusionne leurs morceaux.
+    Renvoie (noms des playlists, liste « Artiste - Titre » sans titre en double).
+    """
     try:
         import spotipy
     except ImportError:
         fail("la bibliothèque 'spotipy' est absente. Lancez : pip install -r requirements.txt")
 
-    playlist_id = extract_playlist_id(args.playlist)
+    # Une même playlist passée deux fois n'est lue qu'une fois (ordre conservé).
+    playlist_ids = list(dict.fromkeys(extract_playlist_id(p) for p in args.playlist))
     sp = build_spotify_client(args)
     access_hint = ("Spotify ne livre le contenu d'une playlist qu'à son propriétaire "
                    "ou à un collaborateur (applications en mode développement). "
                    "Connectez-vous avec le compte propriétaire, ou copiez les morceaux "
                    "dans une playlist à vous.")
 
+    names: list[str] = []
+    sources: list[list[tuple[str, str]]] = []
+    current = playlist_ids[0]  # playlist en cours, pour situer une erreur
     try:
+        me = None
         if args.auth == "user":
             # Déclenche la connexion OAuth au premier lancement (puis cache).
             me = sp.current_user()
             print(f"   Connecté en tant que {me.get('display_name') or me['id']}.")
 
-        meta = sp.playlist(playlist_id)
-        playlist_name = meta.get("name") or playlist_id
-
-        if args.auth == "user":
-            owner_id = (meta.get("owner") or {}).get("id")
-            if owner_id != me["id"] and not meta.get("collaborative"):
-                print(f"⚠️  Cette playlist appartient à « {owner_id} », pas à vous : "
-                      f"son contenu risque d'être refusé. {access_hint}", file=sys.stderr)
-
-        # La pagination est gérée par sp.next() (100 morceaux par page).
-        page = sp.playlist_items(playlist_id, additional_types=("track",), limit=100)
-        if page is None or "items" not in page:
-            fail(f"Spotify n'a pas renvoyé le contenu de la playlist. {access_hint}")
-
-        tracks: list[str] = []
-        seen: set[str] = set()
-        while page:
-            for entry in page.get("items", []):
-                # « item » (nommage depuis 2026) ou « track » (historique).
-                track = entry.get("item") or entry.get("track")
-                # On ignore les entrées vides, locales ou les épisodes de podcast.
-                if not track or track.get("type") != "track" or not track.get("name"):
-                    continue
-                artists = ", ".join(a["name"] for a in track.get("artists", []) if a.get("name"))
-                label = f"{artists} - {track['name']}" if artists else track["name"]
-                key = label.casefold()
-                if key not in seen:  # dédoublonnage (même morceau ajouté deux fois)
-                    seen.add(key)
-                    tracks.append(label)
-            page = sp.next(page) if page.get("next") else None
+        for current in playlist_ids:
+            name, entries = read_playlist(sp, current, me, access_hint)
+            names.append(name)
+            sources.append(entries)
+            print(f"   « {name} » : {len(entries)} morceau(x).")
     except spotipy.oauth2.SpotifyOauthError as exc:
         hint = ""
         if "redirect" in str(exc).lower():
@@ -305,17 +368,18 @@ def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
                     f"de votre application (developer.spotify.com/dashboard).")
         fail(f"authentification Spotify refusée : {exc}{hint}")
     except spotipy.SpotifyException as exc:
+        where = f"playlist {current} : "
         if exc.http_status == 429:
             fail(QUOTA_MESSAGE)
         if exc.http_status == 403:
-            fail(f"accès refusé par Spotify (403) : {exc.msg}. {access_hint} Si votre compte "
-                 f"n'est pas celui du développeur, ajoutez-le dans « User Management » "
-                 f"de l'application.")
+            fail(f"{where}accès refusé par Spotify (403) : {exc.msg}. {access_hint} "
+                 f"Si votre compte n'est pas celui du développeur, ajoutez-le dans "
+                 f"« User Management » de l'application.")
         if exc.http_status == 404:
-            fail(f"playlist introuvable (404) : vérifiez l'URL. Les playlists éditoriales "
+            fail(f"{where}introuvable (404) : vérifiez l'URL. Les playlists éditoriales "
                  f"ou générées par Spotify ne sont pas accessibles aux applications "
                  f"en mode développement.")
-        fail(f"l'API Spotify a répondu {exc.http_status} : {exc.msg}")
+        fail(f"{where}l'API Spotify a répondu {exc.http_status} : {exc.msg}")
     except SpotifyRateLimitError as exc:
         fail(f"{QUOTA_MESSAGE} Spotify refuse les requêtes pendant encore "
              f"{timedelta(seconds=int(exc.retry_after))} (jusqu'à "
@@ -325,7 +389,10 @@ def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
     except Exception as exc:  # réseau, timeout…
         fail(f"impossible de joindre Spotify : {exc}")
 
-    return playlist_name, tracks
+    tracks, duplicates = merge_tracks(sources)
+    if duplicates:
+        print(f"   {duplicates} doublon(s) écarté(s) (même titre, toutes playlists confondues).")
+    return names, tracks
 
 
 # --------------------------------------------------------------------------- #
@@ -434,7 +501,7 @@ def fit_paragraph(text: str, style, width: float, height: float,
         font_size -= 0.5
 
 
-def build_pdf(grids, size: int, output: Path, playlist_name: str) -> None:
+def build_pdf(grids, size: int, output: Path, playlist_names: list[str]) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
@@ -484,7 +551,7 @@ def build_pdf(grids, size: int, output: Path, playlist_name: str) -> None:
 
     for index, grid in enumerate(grids, start=1):
         story.append(Paragraph(f"BINGO MUSICAL — Grille n°{index}", title_style))
-        story.append(Paragraph(escape(playlist_name), subtitle_style))
+        story.append(Paragraph(escape(" + ".join(playlist_names)), subtitle_style))
         story.append(Spacer(1, 8 * mm))
 
         data = []
@@ -539,7 +606,7 @@ def build_pdf(grids, size: int, output: Path, playlist_name: str) -> None:
 # 4. Conducteur animateur
 # --------------------------------------------------------------------------- #
 
-def write_conductor(tracks: list[str], output: Path, playlist_name: str,
+def write_conductor(tracks: list[str], output: Path, playlist_names: list[str],
                     rng: random.Random) -> None:
     order = tracks[:]
     rng.shuffle(order)
@@ -547,7 +614,7 @@ def write_conductor(tracks: list[str], output: Path, playlist_name: str,
     lines = [
         "=" * 60,
         "  BINGO MUSICAL — CONDUCTEUR ANIMATEUR",
-        f"  Playlist : {playlist_name}",
+        *(f"  Playlist : {name}" for name in playlist_names),
         f"  {len(order)} morceaux — généré le {datetime.now():%d/%m/%Y à %H:%M}",
         "=" * 60,
         "",
@@ -566,9 +633,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     rng = random.Random(args.seed)  # seed=None => aléatoire « vrai »
 
-    print("🎵 Récupération de la playlist Spotify…")
-    playlist_name, tracks = fetch_playlist_tracks(args)
-    print(f"   « {playlist_name} » : {len(tracks)} morceau(x) distinct(s).")
+    print("🎵 Récupération des playlists Spotify…")
+    playlist_names, tracks = fetch_playlists_tracks(args)
+    print(f"   Total : {len(tracks)} morceau(x) distinct(s).")
 
     check_feasibility(len(tracks), args.size, args.cards)
 
@@ -577,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pdf_path = Path(args.output)
     try:
-        build_pdf(grids, args.size, pdf_path, playlist_name)
+        build_pdf(grids, args.size, pdf_path, playlist_names)
     except ImportError:
         fail("la bibliothèque 'reportlab' est absente. Lancez : pip install reportlab")
     except OSError as exc:
@@ -586,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
 
     conductor_path = Path(args.conductor)
     try:
-        write_conductor(tracks, conductor_path, playlist_name, rng)
+        write_conductor(tracks, conductor_path, playlist_names, rng)
     except OSError as exc:
         fail(f"impossible d'écrire le conducteur {conductor_path} : {exc}")
     print(f"📝 Conducteur : {conductor_path.resolve()}")

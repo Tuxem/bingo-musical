@@ -1,7 +1,7 @@
 # Bingo musical
 
-Génère des grilles de bingo musical prêtes à imprimer à partir d'une playlist
-Spotify :
+Génère des grilles de bingo musical prêtes à imprimer à partir d'une ou
+plusieurs playlists Spotify, mélangées en un seul répertoire :
 
 - un **PDF multipage** (A4, une grille unique par page, case centrale
   « ★ FREE ★ » si la taille est impaire) ;
@@ -96,7 +96,7 @@ python bingo_musical.py \
 
 | Option | Obligatoire | Défaut | Rôle |
 |---|---|---|---|
-| `--playlist` | oui | — | URL, URI `spotify:playlist:…` ou ID de la playlist |
+| `--playlist` | oui | — | Une ou plusieurs playlists (URL, URI `spotify:playlist:…` ou ID) |
 | `--cards` | oui | — | Nombre de grilles uniques |
 | `--size` | non | `5` | Taille N d'une grille N x N (2 à 10) |
 | `--client_id` | oui* | `$SPOTIPY_CLIENT_ID` | Client ID Spotify |
@@ -112,12 +112,34 @@ python bingo_musical.py \
 
 \* sauf si la variable d'environnement correspondante ou `--config` le fournit.
 
+## Plusieurs playlists
+
+Passez plusieurs playlists à la suite, ou répétez `--playlist` :
+
+```bash
+python bingo_musical.py --playlist URL_ROCK_80 URL_MARIAGE URL_ANNEES_2000 --cards 40
+python bingo_musical.py --playlist URL_ROCK_80 --playlist URL_MARIAGE --cards 40
+```
+
+Leurs morceaux forment un seul répertoire, dans lequel chaque grille pioche.
+**Un titre n'est gardé qu'une fois**, toutes playlists confondues : la
+comparaison porte sur le nom du morceau, sans tenir compte de la casse, des
+accents, de la ponctuation ni des mentions de version (« Remastered 2011 »,
+« Live », « feat. … », « Radio Edit », « Taylor's Version »…). La première
+occurrence, dans l'ordre des playlists, est conservée. Une même playlist
+indiquée deux fois n'est lue qu'une fois.
+
+Deux morceaux différents portant le même titre (une reprise, ou « Hello »
+d'Adele et de Lionel Richie) sont donc eux aussi fusionnés : c'est voulu, deux
+cases « Hello » sur une grille seraient ambiguës pour les joueurs.
+
+Le sous-titre du PDF et l'en-tête du conducteur listent toutes les playlists.
 ## Règles de génération
 
 - Chaque grille pioche au hasard N² morceaux (N² − 1 si N est impair) ; deux
   grilles n'ont jamais exactement le même ensemble de morceaux.
-- Les doublons de la playlist, les épisodes de podcast et les fichiers locaux
-  sont ignorés.
+- Les doublons (même titre, voir ci-dessus), les épisodes de podcast et les
+  fichiers locaux sont ignorés.
 - Le script s'arrête avec un message clair si la playlist est trop courte pour
   une grille, ou pour le nombre de grilles uniques demandé. Il avertit si elle
   dépasse à peine la taille d'une grille (gagnants simultanés probables).
