@@ -10,7 +10,7 @@ Spotify :
 
 ## Installation
 
-Python 3.9+ requis.
+Python 3.9+ et spotipy 2.26+ requis (nouvel endpoint de playlist de 2026).
 
 ```bash
 python -m venv .venv
@@ -18,14 +18,53 @@ source .venv/bin/activate      # Windows : .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Identifiants Spotify
+## Configuration Spotify (une seule fois)
 
-1. Créez une application sur <https://developer.spotify.com/dashboard>.
-2. Récupérez son **Client ID** et son **Client Secret**.
+1. Créez une application sur <https://developer.spotify.com/dashboard>
+   (API utilisée : **Web API**).
+2. Dans ses réglages, ajoutez la **Redirect URI** exacte :
+   `http://127.0.0.1:8888/callback` (Spotify refuse désormais `localhost`).
+3. Récupérez son **Client ID** et son **Client Secret**.
+4. Si quelqu'un d'autre que le titulaire du compte développeur doit lancer le
+   script, ajoutez son compte dans **User Management** (5 utilisateurs maximum
+   en mode développement).
 
-> Les playlists générées par Spotify (« Top 50 », « Daily Mix »…) ne sont plus
-> accessibles aux nouvelles applications et renvoient une 404 : utilisez une
-> playlist **publique créée par un utilisateur**.
+Les identifiants peuvent être passés en option ou par variables
+d'environnement, pour ne pas les laisser dans l'historique du shell :
+
+```bash
+export SPOTIPY_CLIENT_ID="VOTRE_CLIENT_ID"
+export SPOTIPY_CLIENT_SECRET="VOTRE_CLIENT_SECRET"
+```
+
+## Authentification
+
+Par défaut (`--auth user`), le script utilise le flux OAuth **Authorization
+Code** de l'API développeur, au nom de votre compte Spotify :
+
+- au premier lancement, le navigateur s'ouvre et vous demande d'autoriser
+  l'application (lecture seule des playlists, y compris privées et
+  collaboratives) ;
+- le jeton, avec son *refresh token*, est conservé dans
+  `~/.cache/bingo_musical/spotify_token.json` (dossier en `700`) et renouvelé
+  automatiquement : les lancements suivants ne demandent plus rien ;
+- sur une machine sans écran, `--no_browser` affiche l'URL à ouvrir ailleurs
+  et vous demande de coller l'URL de retour ;
+- pour vous déconnecter ou changer de compte, supprimez ce fichier de cache.
+
+> **Pourquoi la connexion utilisateur ?** Depuis février 2026, une application
+> en mode développement n'obtient le contenu d'une playlist que pour un
+> utilisateur connecté qui en est **propriétaire ou collaborateur**. Pour une
+> playlist d'un autre compte, copiez ses morceaux dans une playlist à vous.
+> Les playlists éditoriales ou générées par Spotify (« Top 50 »,
+> « Daily Mix »…) restent inaccessibles.
+>
+> `--auth app` (Client Credentials, sans compte) ne lit le contenu des
+> playlists que pour une application en *extended quota mode*.
+
+Le quota d'appels est partagé entre toutes les applications de votre compte
+développeur ; le script relance automatiquement les requêtes limitées (429)
+en respectant le délai demandé par Spotify.
 
 ## Utilisation
 
@@ -42,11 +81,17 @@ python bingo_musical.py \
 | `--playlist` | oui | — | URL, URI `spotify:playlist:…` ou ID de la playlist |
 | `--cards` | oui | — | Nombre de grilles uniques |
 | `--size` | non | `5` | Taille N d'une grille N x N (2 à 10) |
-| `--client_id` | oui | — | Client ID Spotify |
-| `--client_secret` | oui | — | Client Secret Spotify |
+| `--client_id` | oui* | `$SPOTIPY_CLIENT_ID` | Client ID Spotify |
+| `--client_secret` | oui* | `$SPOTIPY_CLIENT_SECRET` | Client Secret Spotify |
+| `--auth` | non | `user` | `user` (OAuth, votre compte) ou `app` (application seule) |
+| `--redirect_uri` | non | `http://127.0.0.1:8888/callback` | URI de retour OAuth déclarée dans le tableau de bord |
+| `--token_cache` | non | `~/.cache/bingo_musical/spotify_token.json` | Cache du jeton utilisateur |
+| `--no_browser` | non | — | Autorisation par copier-coller d'URL |
 | `--output` | non | `bingo_grilles.pdf` | PDF produit |
 | `--conductor` | non | `conducteur_animateur.txt` | Conducteur produit |
 | `--seed` | non | aléatoire | Graine pour reproduire un tirage |
+
+\* sauf si la variable d'environnement correspondante est définie.
 
 ## Règles de génération
 

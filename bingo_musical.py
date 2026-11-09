@@ -8,9 +8,19 @@ Produit :
 
 Exemple :
     python bingo_musical.py \
-        --playlist "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M" \
+        --playlist "https://open.spotify.com/playlist/XXXXXXXXXXXXXXXXXXXXXX" \
         --cards 30 --size 5 \
         --client_id "VOTRE_CLIENT_ID" --client_secret "VOTRE_CLIENT_SECRET"
+
+Authentification (--auth) :
+  - user (défaut) : flux OAuth « Authorization Code » de l'API développeur.
+    Au premier lancement, le navigateur s'ouvre pour connecter votre compte
+    Spotify ; le jeton (avec refresh token) est ensuite conservé en cache et
+    renouvelé automatiquement. Depuis février 2026, une application en mode
+    développement n'obtient le contenu d'une playlist que pour un utilisateur
+    connecté qui en est propriétaire ou collaborateur.
+  - app : « Client Credentials », sans compte utilisateur. Ne lit le contenu
+    des playlists que si l'application est en « extended quota mode ».
 
 Dépendances : pip install spotipy reportlab
 """
@@ -19,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import random
 import re
 import sys
@@ -34,6 +45,13 @@ FREE_LABEL = "★\u00a0FREE\u00a0★"  # espaces insécables : une seule ligne
 FREE_LABEL_ASCII = "*\u00a0FREE\u00a0*"  # repli si aucune police ne contient « ★ »
 MIN_SIZE, MAX_SIZE = 2, 10
 MAX_UNIQUE_ATTEMPTS = 1000  # tirages max pour obtenir une grille inédite
+
+# OAuth utilisateur : lecture seule des playlists (y compris privées / collaboratives).
+SPOTIFY_SCOPES = "playlist-read-private playlist-read-collaborative"
+# Spotify n'accepte plus « localhost » : il faut une IP de bouclage explicite.
+# Cette URI doit être déclarée à l'identique dans le tableau de bord développeur.
+DEFAULT_REDIRECT_URI = "http://127.0.0.1:8888/callback"
+DEFAULT_TOKEN_CACHE = Path.home() / ".cache" / "bingo_musical" / "spotify_token.json"
 
 # Polices TrueType connues contenant « ★ » (U+2605) — Linux, macOS, Windows.
 UNICODE_FONT_CANDIDATES = [
@@ -64,8 +82,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Nombre de grilles uniques à générer.")
     parser.add_argument("--size", type=int, default=5,
                         help="Taille de la grille (N pour N x N). Défaut : 5.")
-    parser.add_argument("--client_id", required=True, help="Client ID Spotify.")
-    parser.add_argument("--client_secret", required=True, help="Client Secret Spotify.")
+    # Les identifiants peuvent aussi venir de l'environnement (évite de les
+    # laisser dans l'historique du shell) : SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET.
+    env_id = os.environ.get("SPOTIPY_CLIENT_ID")
+    env_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+    parser.add_argument("--client_id", required=not env_id, default=env_id,
+                        help="Client ID Spotify (ou variable SPOTIPY_CLIENT_ID).")
+    parser.add_argument("--client_secret", required=not env_secret, default=env_secret,
+                        help="Client Secret Spotify (ou variable SPOTIPY_CLIENT_SECRET).")
+    # Authentification
+    parser.add_argument("--auth", choices=("user", "app"), default="user",
+                        help="user : connexion de votre compte Spotify (OAuth, défaut) ; "
+                             "app : identifiants de l'application seuls.")
+    parser.add_argument("--redirect_uri",
+                        default=os.environ.get("SPOTIPY_REDIRECT_URI", DEFAULT_REDIRECT_URI),
+                        help=f"URI de redirection OAuth, déclarée dans le tableau de bord "
+                             f"Spotify. Défaut : {DEFAULT_REDIRECT_URI}")
+    parser.add_argument("--token_cache", default=str(DEFAULT_TOKEN_CACHE),
+                        help=f"Fichier de cache du jeton utilisateur. Défaut : {DEFAULT_TOKEN_CACHE}")
+    parser.add_argument("--no_browser", action="store_true",
+                        help="N'ouvre pas le navigateur : affiche l'URL d'autorisation et "
+                             "demande de coller l'URL de retour (machine sans écran).")
     # Options supplémentaires (facultatives)
     parser.add_argument("--output", default="bingo_grilles.pdf",
                         help="Fichier PDF de sortie. Défaut : bingo_grilles.pdf")
@@ -103,37 +140,78 @@ def extract_playlist_id(playlist: str) -> str:
     return ""  # inatteignable, pour les vérificateurs de type
 
 
-def fetch_playlist_tracks(playlist_url: str, client_id: str,
-                          client_secret: str) -> tuple[str, list[str]]:
+def build_spotify_client(args: argparse.Namespace):
+    """Construit le client spotipy selon le mode d'authentification choisi."""
+    import spotipy
+    from spotipy.cache_handler import CacheFileHandler
+    from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
+
+    if args.auth == "app":
+        auth_manager = SpotifyClientCredentials(client_id=args.client_id,
+                                                client_secret=args.client_secret)
+    else:
+        # Le jeton contient un refresh token : on le range hors du dossier courant,
+        # dans un répertoire lisible par vous seul.
+        cache = Path(args.token_cache).expanduser()
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cache.parent.chmod(0o700)
+        except OSError:
+            pass  # systèmes de fichiers sans permissions POSIX (Windows…)
+        auth_manager = SpotifyOAuth(
+            client_id=args.client_id,
+            client_secret=args.client_secret,
+            redirect_uri=args.redirect_uri,
+            scope=SPOTIFY_SCOPES,
+            cache_handler=CacheFileHandler(cache_path=str(cache)),
+            open_browser=not args.no_browser,
+        )
+
+    # spotipy relance automatiquement les 429 / 5xx en respectant Retry-After.
+    return spotipy.Spotify(auth_manager=auth_manager, requests_timeout=15,
+                           retries=3, status_retries=5, backoff_factor=0.5)
+
+
+def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
     """Renvoie (nom de la playlist, liste « Artiste - Titre » sans doublons)."""
     try:
         import spotipy
-        from spotipy.oauth2 import SpotifyClientCredentials
     except ImportError:
-        fail("la bibliothèque 'spotipy' est absente. Lancez : pip install spotipy")
+        fail("la bibliothèque 'spotipy' est absente. Lancez : pip install -r requirements.txt")
 
-    playlist_id = extract_playlist_id(playlist_url)
-    sp = spotipy.Spotify(
-        auth_manager=SpotifyClientCredentials(client_id=client_id,
-                                              client_secret=client_secret),
-        requests_timeout=15,
-        retries=3,
-    )
+    playlist_id = extract_playlist_id(args.playlist)
+    sp = build_spotify_client(args)
+    access_hint = ("Spotify ne livre le contenu d'une playlist qu'à son propriétaire "
+                   "ou à un collaborateur (applications en mode développement). "
+                   "Connectez-vous avec le compte propriétaire, ou copiez les morceaux "
+                   "dans une playlist à vous.")
 
     try:
-        playlist_name = sp.playlist(playlist_id, fields="name")["name"]
+        if args.auth == "user":
+            # Déclenche la connexion OAuth au premier lancement (puis cache).
+            me = sp.current_user()
+            print(f"   Connecté en tant que {me.get('display_name') or me['id']}.")
+
+        meta = sp.playlist(playlist_id)
+        playlist_name = meta.get("name") or playlist_id
+
+        if args.auth == "user":
+            owner_id = (meta.get("owner") or {}).get("id")
+            if owner_id != me["id"] and not meta.get("collaborative"):
+                print(f"⚠️  Cette playlist appartient à « {owner_id} », pas à vous : "
+                      f"son contenu risque d'être refusé. {access_hint}", file=sys.stderr)
+
         # La pagination est gérée par sp.next() (100 morceaux par page).
-        page = sp.playlist_items(
-            playlist_id,
-            additional_types=("track",),
-            limit=100,
-        )
+        page = sp.playlist_items(playlist_id, additional_types=("track",), limit=100)
+        if page is None or "items" not in page:
+            fail(f"Spotify n'a pas renvoyé le contenu de la playlist. {access_hint}")
+
         tracks: list[str] = []
         seen: set[str] = set()
         while page:
-            for item in page.get("items", []):
-                # « track » (historique) ou « item » (nommage récent de l'API).
-                track = item.get("track") or item.get("item")
+            for entry in page.get("items", []):
+                # « item » (nommage depuis 2026) ou « track » (historique).
+                track = entry.get("item") or entry.get("track")
                 # On ignore les entrées vides, locales ou les épisodes de podcast.
                 if not track or track.get("type") != "track" or not track.get("name"):
                     continue
@@ -145,13 +223,26 @@ def fetch_playlist_tracks(playlist_url: str, client_id: str,
                     tracks.append(label)
             page = sp.next(page) if page.get("next") else None
     except spotipy.oauth2.SpotifyOauthError as exc:
-        fail(f"authentification Spotify refusée (Client ID / Secret ?) : {exc}")
-    except spotipy.SpotifyException as exc:
         hint = ""
+        if "redirect" in str(exc).lower():
+            hint = (f" — déclarez exactement « {args.redirect_uri} » dans les Redirect URIs "
+                    f"de votre application (developer.spotify.com/dashboard).")
+        fail(f"authentification Spotify refusée : {exc}{hint}")
+    except spotipy.SpotifyException as exc:
+        if exc.http_status == 429:
+            fail("quota de l'API Spotify dépassé (429). Ce quota est partagé entre toutes "
+                 "les applications de votre compte développeur : réessayez plus tard.")
+        if exc.http_status == 403:
+            fail(f"accès refusé par Spotify (403) : {exc.msg}. {access_hint} Si votre compte "
+                 f"n'est pas celui du développeur, ajoutez-le dans « User Management » "
+                 f"de l'application.")
         if exc.http_status == 404:
-            hint = (" — playlist introuvable, privée, ou générée par Spotify "
-                    "(ces dernières ne sont plus accessibles aux nouvelles applications).")
-        fail(f"l'API Spotify a répondu {exc.http_status} : {exc.msg}{hint}")
+            fail(f"playlist introuvable (404) : vérifiez l'URL. Les playlists éditoriales "
+                 f"ou générées par Spotify ne sont pas accessibles aux applications "
+                 f"en mode développement.")
+        fail(f"l'API Spotify a répondu {exc.http_status} : {exc.msg}")
+    except (KeyboardInterrupt, EOFError):
+        fail("connexion Spotify annulée.")
     except Exception as exc:  # réseau, timeout…
         fail(f"impossible de joindre Spotify : {exc}")
 
@@ -397,8 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)  # seed=None => aléatoire « vrai »
 
     print("🎵 Récupération de la playlist Spotify…")
-    playlist_name, tracks = fetch_playlist_tracks(args.playlist, args.client_id,
-                                                  args.client_secret)
+    playlist_name, tracks = fetch_playlist_tracks(args)
     print(f"   « {playlist_name} » : {len(tracks)} morceau(x) distinct(s).")
 
     check_feasibility(len(tracks), args.size, args.cards)

@@ -1,2 +1,2 @@
-spotipy>=2.24
+spotipy>=2.26  # endpoint /playlists/{id}/items (API 2026)
 reportlab>=4.0
