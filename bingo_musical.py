@@ -183,26 +183,43 @@ def extract_playlist_id(playlist: str) -> str:
     return ""  # inatteignable, pour les vérificateurs de type
 
 
-# Segments de version qui ne changent pas l'identité d'un morceau :
-# « Titre - Remastered 2011 », « Titre (Live) », « Titre [feat. X] »…
+# Tout ce qui est entre parenthèses ou crochets est ignoré pour comparer deux
+# titres : « (Remastered 2011) », « [Live at Wembley] », « (Acoustic Version) »,
+# « (feat. X) »… quel qu'en soit le contenu.
+_BRACKETED = re.compile(r"\([^()]*\)|\[[^\[\]]*\]")
+_UNCLOSED = re.compile(r"\s*[(\[].*$")  # « Titre (Live » tronqué par Spotify
+# Après un tiret, seules les mentions de version sont retirées : le tiret fait
+# parfois partie du vrai titre (« Ob-La-Di », « Hey - Ho »…).
 _VERSION_WORDS = (r"remaster\w*|live|version|edit|mix|remix|mono|stereo|feat\.?|ft\.?|"
                   r"featuring|acoustic|acoustique|deluxe|bonus|radio|single|demo|instrumental|"
                   r"unplugged|extended|original|bande originale|from\b|soundtrack")
-_VERSION_BRACKETS = re.compile(rf"[(\[][^)\]]*\b(?:{_VERSION_WORDS})[^)\]]*[)\]]", re.IGNORECASE)
 _VERSION_DASH = re.compile(rf"\s+-\s+.*\b(?:{_VERSION_WORDS}).*$", re.IGNORECASE)
+
+
+def _simplify(text: str) -> str:
+    """Casse, accents et ponctuation retirés."""
+    t = unicodedata.normalize("NFKD", text.casefold())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return re.sub(r"[^\w]+", " ", t).strip()
 
 
 def normalize_title(title: str) -> str:
     """
     Clé de dédoublonnage d'un morceau : son TITRE, sans casse, accents,
-    ponctuation ni mention de version. « Bohemian Rhapsody - Remastered 2011 »
-    et « Bohémian rhapsody (Live) » donnent la même clé.
+    ponctuation, ni rien de ce qui est entre parenthèses / crochets, ni mention
+    de version après un tiret. « Bohemian Rhapsody - Remastered 2011 »,
+    « Bohémian rhapsody (Live) » et « Bohemian Rhapsody [Acoustic] » donnent
+    la même clé. Le libellé imprimé sur les grilles, lui, reste intact.
     """
-    t = _VERSION_DASH.sub("", _VERSION_BRACKETS.sub("", title))
-    t = unicodedata.normalize("NFKD", t.casefold())
-    t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    t = re.sub(r"[^\w]+", " ", t).strip()
-    return t or title.casefold().strip()  # titre fait uniquement de symboles
+    t = title
+    while True:  # de l'intérieur vers l'extérieur : « (Live (2011)) »
+        stripped = _BRACKETED.sub(" ", t)
+        if stripped == t:
+            break
+        t = stripped
+    t = _VERSION_DASH.sub("", _UNCLOSED.sub("", t))
+    # Titre entièrement entre parenthèses (« (Untitled) ») : on garde son contenu.
+    return _simplify(t) or _simplify(title) or title.casefold().strip()
 
 
 def merge_tracks(sources: list[list[tuple[str, str]]]) -> tuple[list[str], int]:

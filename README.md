@@ -123,10 +123,20 @@ python bingo_musical.py --playlist URL_ROCK_80 --playlist URL_MARIAGE --cards 40
 
 Leurs morceaux forment un seul répertoire, dans lequel chaque grille pioche.
 **Un titre n'est gardé qu'une fois**, toutes playlists confondues : la
-comparaison porte sur le nom du morceau, sans tenir compte de la casse, des
-accents, de la ponctuation ni des mentions de version (« Remastered 2011 »,
-« Live », « feat. … », « Radio Edit », « Taylor's Version »…). La première
-occurrence, dans l'ordre des playlists, est conservée. Une même playlist
+comparaison porte sur le nom du morceau, sans tenir compte :
+
+- de la casse, des accents et de la ponctuation ;
+- de **tout ce qui est entre parenthèses ou crochets**, quel qu'en soit le
+  contenu : « Creep (Acoustic) », « Hotel California (2013 Remaster) » et
+  « Bohemian Rhapsody [Live Aid] » valent « Creep », « Hotel California » et
+  « Bohemian Rhapsody » ;
+- des mentions de version après un tiret (« - Remastered 2011 »,
+  « - Live », « - Radio Edit »…). Un tiret sans mention de version est gardé,
+  car il fait parfois partie du titre.
+
+La première occurrence, dans l'ordre des playlists, est conservée, avec son
+libellé d'origine : la normalisation ne sert qu'à comparer, elle ne modifie
+pas ce qui est imprimé sur les grilles. Une même playlist
 indiquée deux fois n'est lue qu'une fois.
 
 Deux morceaux différents portant le même titre (une reprise, ou « Hello »
