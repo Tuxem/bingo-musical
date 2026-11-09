@@ -6,3 +6,6 @@ venv/
 *.pdf
 conducteur_animateur.txt
 .cache-*
+# Secrets Spotify
+config.yml
+export/

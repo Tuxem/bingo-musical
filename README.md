@@ -106,9 +106,12 @@ python bingo_musical.py \
 | `--redirect_uri` | non | `http://127.0.0.1:8888/callback` | URI de retour OAuth déclarée dans le tableau de bord |
 | `--token_cache` | non | `~/.cache/bingo_musical/spotify_token.json` | Cache du jeton utilisateur |
 | `--no_browser` | non | — | Autorisation par copier-coller d'URL |
-| `--output` | non | `bingo_grilles.pdf` | PDF produit |
-| `--conductor` | non | `conducteur_animateur.txt` | Conducteur produit |
+| `--output` | non | `bingo_grilles.pdf` | Nom du PDF, créé dans `export/` avec le préfixe |
+| `--conductor` | non | `conducteur_animateur.txt` | Nom du conducteur, créé dans `export/` avec le préfixe |
+| `--prefixe` | non | date du jour (`AAAA-MM-JJ`) | Préfixe des fichiers générés |
 | `--seed` | non | aléatoire | Graine pour reproduire un tirage |
+| `--title` | non | aucun | Titre sous l'en-tête de chaque grille (rien si absent) |
+| `--footer` | non | aucun | Texte en bas de chaque grille (rien si absent) |
 
 \* sauf si la variable d'environnement correspondante ou `--config` le fournit.
 

@@ -29,10 +29,13 @@ Dépendances : pip install spotipy reportlab
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import math
 import os
 import random
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 from datetime import datetime, timedelta
@@ -78,6 +81,9 @@ UNICODE_FONT_CANDIDATES = [
 # Ligne de commande
 # --------------------------------------------------------------------------- #
 
+EXPORT_DIR = "export"  # dossier de sortie des fichiers générés
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Génère des grilles de bingo musical (PDF) depuis une playlist Spotify.",
@@ -116,11 +122,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "demande de coller l'URL de retour (machine sans écran).")
     # Options supplémentaires (facultatives)
     parser.add_argument("--output", default="bingo_grilles.pdf",
-                        help="Fichier PDF de sortie. Défaut : bingo_grilles.pdf")
+                        help="Nom du PDF (créé dans export/, préfixé). Défaut : bingo_grilles.pdf")
     parser.add_argument("--conductor", default="conducteur_animateur.txt",
-                        help="Fichier texte du conducteur. Défaut : conducteur_animateur.txt")
+                        help="Nom du conducteur (créé dans export/, préfixé). Défaut : conducteur_animateur.txt")
     parser.add_argument("--seed", type=int, default=None,
                         help="Graine aléatoire (pour reproduire exactement un tirage).")
+    parser.add_argument("--prefixe", default=None,
+                        help="Préfixe des fichiers générés. Défaut : date de l'export "
+                             "(AAAA-MM-JJ).")
+    parser.add_argument("--title", default=None,
+                        help="Titre affiché sous l'en-tête de chaque grille. "
+                             "Absent : aucun titre.")
+    parser.add_argument("--footer", default=None,
+                        help="Texte affiché en bas de chaque grille. "
+                             "Absent : aucun texte.")
     args = parser.parse_args(argv)
 
     # Fusion des sources : ligne de commande > environnement > fichier > défaut.
@@ -267,6 +282,19 @@ def merge_tracks(sources: list[list[tuple[str, str, str]]]) -> tuple[list[str], 
     return merged, duplicates
 
 
+def prepare_browser() -> None:
+    """
+    Prépare l'ouverture automatique du navigateur pour la connexion OAuth.
+    Sous Linux, « webbrowser » échoue parfois en silence (Firefox en snap…)
+    alors que xdg-open fonctionne : sans variable BROWSER, on s'appuie dessus.
+    """
+    if sys.platform.startswith("linux") and not os.environ.get("BROWSER") \
+            and shutil.which("xdg-open"):
+        os.environ["BROWSER"] = "xdg-open"
+    print("   Autorisez l'accès dans votre navigateur (en attente de la réponse de Spotify). "
+          "Rien ne s'ouvre ? Relancez avec --no_browser.")
+
+
 def build_spotify_client(args: argparse.Namespace):
     """Construit le client spotipy selon le mode d'authentification choisi."""
     import spotipy
@@ -285,6 +313,8 @@ def build_spotify_client(args: argparse.Namespace):
             cache.parent.chmod(0o700)
         except OSError:
             pass  # systèmes de fichiers sans permissions POSIX (Windows…)
+        if not args.no_browser:
+            prepare_browser()
         auth_manager = SpotifyOAuth(
             client_id=args.client_id,
             client_secret=args.client_secret,
@@ -543,7 +573,8 @@ def fit_paragraph(text: str, style, width: float, height: float,
         font_size -= 0.5
 
 
-def build_pdf(grids, size: int, output: Path, playlist_names: list[str]) -> None:
+def build_pdf(grids, size: int, output: Path, title: str | None = None,
+              footer: str | None = None) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
@@ -593,7 +624,8 @@ def build_pdf(grids, size: int, output: Path, playlist_names: list[str]) -> None
 
     for index, grid in enumerate(grids, start=1):
         story.append(Paragraph(f"BINGO MUSICAL — Grille n°{index}", title_style))
-        story.append(Paragraph(escape(" + ".join(playlist_names)), subtitle_style))
+        if title:
+            story.append(Paragraph(escape(title), subtitle_style))
         story.append(Spacer(1, 8 * mm))
 
         data = []
@@ -634,10 +666,9 @@ def build_pdf(grids, size: int, output: Path, playlist_names: list[str]) -> None
         table.setStyle(TableStyle(style_cmds))
         story.append(table)
 
-        story.append(Spacer(1, 6 * mm))
-        story.append(Paragraph(
-            "Cochez chaque morceau entendu. Une ligne, une colonne ou une diagonale "
-            "complète ? Criez « BINGO ! »", footer_style))
+        if footer:
+            story.append(Spacer(1, 6 * mm))
+            story.append(Paragraph(escape(footer), footer_style))
         if index < len(grids):
             story.append(PageBreak())
 
@@ -671,6 +702,34 @@ def write_conductor(tracks: list[str], output: Path, playlist_names: list[str],
 # Point d'entrée
 # --------------------------------------------------------------------------- #
 
+def open_output_folder(files: list[Path]) -> None:
+    """
+    Ouvre le gestionnaire de fichiers sur le dossier des fichiers générés
+    (une fois par dossier). Windows : l'Explorateur avec le premier fichier
+    sélectionné ; macOS : le Finder ; Linux : xdg-open. Un échec est sans gravité.
+    """
+    folders = list(dict.fromkeys(f.resolve().parent for f in files))
+    try:
+        if sys.platform == "win32":
+            first = files[0].resolve()
+            subprocess.Popen(["explorer", f"/select,{first}"])
+            for folder in folders:
+                if folder != first.parent:
+                    os.startfile(folder)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            for folder in folders:
+                subprocess.Popen(["open", str(folder)])
+        elif shutil.which("xdg-open"):
+            for folder in folders:
+                subprocess.Popen(["xdg-open", str(folder)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            return
+    except OSError:
+        return
+    print(f"📂 Dossier ouvert : {', '.join(str(f) for f in folders)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     rng = random.Random(args.seed)  # seed=None => aléatoire « vrai »
@@ -684,21 +743,29 @@ def main(argv: list[str] | None = None) -> int:
     print(f"🎲 Génération de {args.cards} grille(s) {args.size}x{args.size}…")
     grids = generate_cards(tracks, args.size, args.cards, rng)
 
-    pdf_path = Path(args.output)
+    prefix = args.prefixe or date.today().isoformat()
+    export_dir = Path(EXPORT_DIR)
     try:
-        build_pdf(grids, args.size, pdf_path, playlist_names)
+        export_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        fail(f"impossible de créer le dossier {export_dir} : {exc}")
+    pdf_path = export_dir / f"{prefix}_{Path(args.output).name}"
+    try:
+        build_pdf(grids, args.size, pdf_path, args.title, args.footer)
     except ImportError:
         fail("la bibliothèque 'reportlab' est absente. Lancez : pip install reportlab")
     except OSError as exc:
         fail(f"impossible d'écrire le PDF {pdf_path} : {exc}")
     print(f"📄 PDF : {pdf_path.resolve()}")
 
-    conductor_path = Path(args.conductor)
+    conductor_path = export_dir / f"{prefix}_{Path(args.conductor).name}"
     try:
         write_conductor(tracks, conductor_path, playlist_names, rng)
     except OSError as exc:
         fail(f"impossible d'écrire le conducteur {conductor_path} : {exc}")
     print(f"📝 Conducteur : {conductor_path.resolve()}")
+    if not args.no_browser:
+        open_output_folder([pdf_path, conductor_path])
     print("✅ Terminé, bonne soirée !")
     return 0
 
