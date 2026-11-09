@@ -33,7 +33,7 @@ import os
 import random
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -45,12 +45,15 @@ FREE_LABEL = "★\u00a0FREE\u00a0★"  # espaces insécables : une seule ligne
 FREE_LABEL_ASCII = "*\u00a0FREE\u00a0*"  # repli si aucune police ne contient « ★ »
 MIN_SIZE, MAX_SIZE = 2, 10
 MAX_UNIQUE_ATTEMPTS = 1000  # tirages max pour obtenir une grille inédite
+MAX_RETRY_AFTER = 60  # au-delà (en s), on abandonne plutôt que d'attendre Spotify
 
 # OAuth utilisateur : lecture seule des playlists (y compris privées / collaboratives).
 SPOTIFY_SCOPES = "playlist-read-private playlist-read-collaborative"
 # Spotify n'accepte plus « localhost » : il faut une IP de bouclage explicite.
 # Cette URI doit être déclarée à l'identique dans le tableau de bord développeur.
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:8888/callback"
+QUOTA_MESSAGE = ("quota de l'API Spotify dépassé (429). Ce quota est partagé entre "
+                 "toutes les applications de votre compte développeur.")
 DEFAULT_TOKEN_CACHE = Path.home() / ".cache" / "bingo_musical" / "spotify_token.json"
 
 # Polices TrueType connues contenant « ★ » (U+2605) — Linux, macOS, Windows.
@@ -82,20 +85,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Nombre de grilles uniques à générer.")
     parser.add_argument("--size", type=int, default=5,
                         help="Taille de la grille (N pour N x N). Défaut : 5.")
-    # Les identifiants peuvent aussi venir de l'environnement (évite de les
-    # laisser dans l'historique du shell) : SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET.
-    env_id = os.environ.get("SPOTIPY_CLIENT_ID")
-    env_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
-    parser.add_argument("--client_id", required=not env_id, default=env_id,
-                        help="Client ID Spotify (ou variable SPOTIPY_CLIENT_ID).")
-    parser.add_argument("--client_secret", required=not env_secret, default=env_secret,
-                        help="Client Secret Spotify (ou variable SPOTIPY_CLIENT_SECRET).")
+    # Identifiants : ligne de commande, sinon variables d'environnement
+    # (SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET), sinon fichier --config.
+    parser.add_argument("--client_id", default=None,
+                        help="Client ID Spotify (ou SPOTIPY_CLIENT_ID, ou --config).")
+    parser.add_argument("--client_secret", default=None,
+                        help="Client Secret Spotify (ou SPOTIPY_CLIENT_SECRET, ou --config).")
+    parser.add_argument("--config", default=None,
+                        help="Fichier YAML contenant un bloc « spotify: » (client_id, "
+                             "client_secret, redirect_uri, open_browser) — le même format "
+                             "que le config.yml de spotify-tidal-sync.")
     # Authentification
     parser.add_argument("--auth", choices=("user", "app"), default="user",
                         help="user : connexion de votre compte Spotify (OAuth, défaut) ; "
                              "app : identifiants de l'application seuls.")
-    parser.add_argument("--redirect_uri",
-                        default=os.environ.get("SPOTIPY_REDIRECT_URI", DEFAULT_REDIRECT_URI),
+    parser.add_argument("--redirect_uri", default=None,
                         help=f"URI de redirection OAuth, déclarée dans le tableau de bord "
                              f"Spotify. Défaut : {DEFAULT_REDIRECT_URI}")
     parser.add_argument("--token_cache", default=str(DEFAULT_TOKEN_CACHE),
@@ -112,11 +116,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Graine aléatoire (pour reproduire exactement un tirage).")
     args = parser.parse_args(argv)
 
+    # Fusion des sources : ligne de commande > environnement > fichier > défaut.
+    conf = load_spotify_config(args.config, parser) if args.config else {}
+    args.client_id = (args.client_id or os.environ.get("SPOTIPY_CLIENT_ID")
+                      or conf.get("client_id"))
+    args.client_secret = (args.client_secret or os.environ.get("SPOTIPY_CLIENT_SECRET")
+                          or conf.get("client_secret"))
+    args.redirect_uri = (args.redirect_uri or os.environ.get("SPOTIPY_REDIRECT_URI")
+                         or conf.get("redirect_uri") or DEFAULT_REDIRECT_URI)
+    if conf.get("open_browser") is False:
+        args.no_browser = True
+    for name in ("client_id", "client_secret"):
+        if not getattr(args, name):
+            parser.error(f"--{name} manquant : passez-le en option, par la variable "
+                         f"SPOTIPY_{name.upper()} ou dans le bloc « spotify: » de --config.")
+
     if args.cards < 1:
         parser.error("--cards doit être un entier strictement positif.")
     if not MIN_SIZE <= args.size <= MAX_SIZE:
         parser.error(f"--size doit être compris entre {MIN_SIZE} et {MAX_SIZE}.")
     return args
+
+
+def load_spotify_config(path: str, parser: argparse.ArgumentParser) -> dict:
+    """Lit le bloc « spotify: » d'un fichier YAML (format de spotify-tidal-sync)."""
+    try:
+        import yaml
+    except ImportError:
+        parser.error("--config nécessite PyYAML : pip install pyyaml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except OSError as exc:
+        parser.error(f"impossible de lire {path} : {exc}")
+    except yaml.YAMLError as exc:
+        parser.error(f"{path} n'est pas un YAML valide : {exc}")
+    block = data.get("spotify") if isinstance(data, dict) else None
+    if not isinstance(block, dict):
+        parser.error(f"{path} ne contient pas de bloc « spotify: ».")
+    return block
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -167,9 +205,47 @@ def build_spotify_client(args: argparse.Namespace):
             open_browser=not args.no_browser,
         )
 
-    # spotipy relance automatiquement les 429 / 5xx en respectant Retry-After.
     return spotipy.Spotify(auth_manager=auth_manager, requests_timeout=15,
-                           retries=3, status_retries=5, backoff_factor=0.5)
+                           requests_session=build_requests_session())
+
+
+class SpotifyRateLimitError(Exception):
+    """Spotify demande d'attendre plus longtemps que ce qu'on accepte."""
+
+    def __init__(self, retry_after: float):
+        self.retry_after = retry_after
+        super().__init__(retry_after)
+
+
+def build_requests_session():
+    """
+    Session HTTP qui relance les 429 / 5xx en respectant Retry-After, mais
+    abandonne si Spotify demande d'attendre plus de MAX_RETRY_AFTER secondes.
+    spotipy, lui, attendrait sagement : une application en mode développement
+    qui a épuisé son quota quotidien peut être bloquée près d'un jour, et le
+    script resterait figé tout ce temps (même garde-fou que spotify-tidal-sync).
+    """
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    class FailFastRetry(Retry):
+        def get_retry_after(self, response):
+            retry_after = super().get_retry_after(response)
+            if retry_after is not None and retry_after > MAX_RETRY_AFTER:
+                header = response.headers.get("Retry-After", "").strip()
+                raise SpotifyRateLimitError(int(header) if header.isdigit() else retry_after)
+            return retry_after
+
+    retry = FailFastRetry(total=3, connect=None, read=False, status=3,
+                          backoff_factor=0.5,
+                          status_forcelist=(429, 500, 502, 503, 504),
+                          allowed_methods=frozenset(["GET", "POST"]))
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
@@ -230,8 +306,7 @@ def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
         fail(f"authentification Spotify refusée : {exc}{hint}")
     except spotipy.SpotifyException as exc:
         if exc.http_status == 429:
-            fail("quota de l'API Spotify dépassé (429). Ce quota est partagé entre toutes "
-                 "les applications de votre compte développeur : réessayez plus tard.")
+            fail(QUOTA_MESSAGE)
         if exc.http_status == 403:
             fail(f"accès refusé par Spotify (403) : {exc.msg}. {access_hint} Si votre compte "
                  f"n'est pas celui du développeur, ajoutez-le dans « User Management » "
@@ -241,6 +316,10 @@ def fetch_playlist_tracks(args: argparse.Namespace) -> tuple[str, list[str]]:
                  f"ou générées par Spotify ne sont pas accessibles aux applications "
                  f"en mode développement.")
         fail(f"l'API Spotify a répondu {exc.http_status} : {exc.msg}")
+    except SpotifyRateLimitError as exc:
+        fail(f"{QUOTA_MESSAGE} Spotify refuse les requêtes pendant encore "
+             f"{timedelta(seconds=int(exc.retry_after))} (jusqu'à "
+             f"{datetime.now() + timedelta(seconds=exc.retry_after):%d/%m à %H:%M}).")
     except (KeyboardInterrupt, EOFError):
         fail("connexion Spotify annulée.")
     except Exception as exc:  # réseau, timeout…

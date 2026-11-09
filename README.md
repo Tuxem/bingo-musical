@@ -29,13 +29,25 @@ pip install -r requirements.txt
    script, ajoutez son compte dans **User Management** (5 utilisateurs maximum
    en mode développement).
 
-Les identifiants peuvent être passés en option ou par variables
-d'environnement, pour ne pas les laisser dans l'historique du shell :
+Les identifiants peuvent être passés en option, par variables
+d'environnement (pour ne pas les laisser dans l'historique du shell) :
 
 ```bash
 export SPOTIPY_CLIENT_ID="VOTRE_CLIENT_ID"
 export SPOTIPY_CLIENT_SECRET="VOTRE_CLIENT_SECRET"
 ```
+
+ou par un fichier YAML (`--config`), au format du `config.yml` de
+[spotify-tidal-sync](https://github.com/Tuxem/spotify-tidal-sync) : seul son
+bloc `spotify:` est lu (`client_id`, `client_secret`, `redirect_uri`,
+`open_browser`). La même application Spotify sert alors aux deux outils.
+
+```bash
+python bingo_musical.py --config ../spotify-tidal-sync/config.yml --playlist "…" --cards 30
+```
+
+Ordre de priorité : ligne de commande, puis variables d'environnement, puis
+fichier `--config`.
 
 ## Authentification
 
@@ -50,7 +62,11 @@ Code** de l'API développeur, au nom de votre compte Spotify :
   automatiquement : les lancements suivants ne demandent plus rien ;
 - sur une machine sans écran, `--no_browser` affiche l'URL à ouvrir ailleurs
   et vous demande de coller l'URL de retour ;
-- pour vous déconnecter ou changer de compte, supprimez ce fichier de cache.
+- pour vous déconnecter ou changer de compte, supprimez ce fichier de cache ;
+- si vous utilisez déjà spotify-tidal-sync avec la même application, son jeton
+  (`.cache-<username>` à la racine de ce projet) couvre aussi les droits du
+  bingo : `--token_cache ../spotify-tidal-sync/.cache-<username>` évite une
+  nouvelle autorisation.
 
 > **Pourquoi la connexion utilisateur ?** Depuis février 2026, une application
 > en mode développement n'obtient le contenu d'une playlist que pour un
@@ -63,8 +79,10 @@ Code** de l'API développeur, au nom de votre compte Spotify :
 > playlists que pour une application en *extended quota mode*.
 
 Le quota d'appels est partagé entre toutes les applications de votre compte
-développeur ; le script relance automatiquement les requêtes limitées (429)
-en respectant le délai demandé par Spotify.
+développeur (spotify-tidal-sync compris). Le script relance une requête
+limitée (429) si Spotify demande d'attendre au plus une minute ; au-delà
+(quota quotidien épuisé, blocage pouvant durer près d'un jour), il s'arrête
+en indiquant jusqu'à quand, au lieu de rester figé.
 
 ## Utilisation
 
@@ -83,6 +101,7 @@ python bingo_musical.py \
 | `--size` | non | `5` | Taille N d'une grille N x N (2 à 10) |
 | `--client_id` | oui* | `$SPOTIPY_CLIENT_ID` | Client ID Spotify |
 | `--client_secret` | oui* | `$SPOTIPY_CLIENT_SECRET` | Client Secret Spotify |
+| `--config` | non | — | YAML avec un bloc `spotify:` (format spotify-tidal-sync) |
 | `--auth` | non | `user` | `user` (OAuth, votre compte) ou `app` (application seule) |
 | `--redirect_uri` | non | `http://127.0.0.1:8888/callback` | URI de retour OAuth déclarée dans le tableau de bord |
 | `--token_cache` | non | `~/.cache/bingo_musical/spotify_token.json` | Cache du jeton utilisateur |
@@ -91,7 +110,7 @@ python bingo_musical.py \
 | `--conductor` | non | `conducteur_animateur.txt` | Conducteur produit |
 | `--seed` | non | aléatoire | Graine pour reproduire un tirage |
 
-\* sauf si la variable d'environnement correspondante est définie.
+\* sauf si la variable d'environnement correspondante ou `--config` le fournit.
 
 ## Règles de génération
 

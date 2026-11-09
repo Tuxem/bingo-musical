@@ -1,2 +1,3 @@
 spotipy>=2.26  # endpoint /playlists/{id}/items (API 2026)
 reportlab>=4.0
+pyyaml>=6.0  # seulement pour --config
