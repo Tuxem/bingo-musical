@@ -122,8 +122,14 @@ python bingo_musical.py --playlist URL_ROCK_80 --playlist URL_MARIAGE --cards 40
 ```
 
 Leurs morceaux forment un seul répertoire, dans lequel chaque grille pioche.
-**Un titre n'est gardé qu'une fois**, toutes playlists confondues : la
-comparaison porte sur le nom du morceau, sans tenir compte :
+**Un morceau n'est gardé qu'une fois**, toutes playlists confondues : deux
+morceaux sont identiques s'ils ont **le même artiste et le même titre**.
+
+L'artiste comparé est l'artiste principal (le premier crédité), sans casse
+ni accents : Spotify ajoute ou retire les invités d'une version à l'autre
+(« Lady Gaga » / « Lady Gaga, Bradley Cooper »).
+
+Le titre est comparé sans tenir compte :
 
 - de la casse, des accents et de la ponctuation ;
 - de **tout ce qui est entre parenthèses ou crochets**, quel qu'en soit le
@@ -139,16 +145,17 @@ libellé d'origine : la normalisation ne sert qu'à comparer, elle ne modifie
 pas ce qui est imprimé sur les grilles. Une même playlist
 indiquée deux fois n'est lue qu'une fois.
 
-Deux morceaux différents portant le même titre (une reprise, ou « Hello »
-d'Adele et de Lionel Richie) sont donc eux aussi fusionnés : c'est voulu, deux
-cases « Hello » sur une grille seraient ambiguës pour les joueurs.
+Une reprise reste donc un morceau à part : « Toto - Africa » et
+« Weezer - Africa », ou « Hello » d'Adele et de Lionel Richie, occupent
+chacun leur case.
 
 Le sous-titre du PDF et l'en-tête du conducteur listent toutes les playlists.
+
 ## Règles de génération
 
 - Chaque grille pioche au hasard N² morceaux (N² − 1 si N est impair) ; deux
   grilles n'ont jamais exactement le même ensemble de morceaux.
-- Les doublons (même titre, voir ci-dessus), les épisodes de podcast et les
+- Les doublons (même artiste et même titre, voir ci-dessus), les épisodes de podcast et les
   fichiers locaux sont ignorés.
 - Le script s'arrête avec un message clair si la playlist est trop courte pour
   une grille, ou pour le nombre de grilles uniques demandé. Il avertit si elle

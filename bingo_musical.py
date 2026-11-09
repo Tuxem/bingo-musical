@@ -205,7 +205,7 @@ def _simplify(text: str) -> str:
 
 def normalize_title(title: str) -> str:
     """
-    Clé de dédoublonnage d'un morceau : son TITRE, sans casse, accents,
+    Partie « titre » de la clé de dédoublonnage : sans casse, accents,
     ponctuation, ni rien de ce qui est entre parenthèses / crochets, ni mention
     de version après un tiret. « Bohemian Rhapsody - Remastered 2011 »,
     « Bohémian rhapsody (Live) » et « Bohemian Rhapsody [Acoustic] » donnent
@@ -222,19 +222,31 @@ def normalize_title(title: str) -> str:
     return _simplify(t) or _simplify(title) or title.casefold().strip()
 
 
-def merge_tracks(sources: list[list[tuple[str, str]]]) -> tuple[list[str], int]:
+def track_key(artist: str, title: str) -> tuple[str, str]:
     """
-    Fusionne les morceaux de plusieurs playlists, (libellé, titre) chacun.
-    Un titre déjà vu (même nom, cf. normalize_title) n'est gardé qu'une fois :
-    la première occurrence l'emporte, dans l'ordre des playlists.
+    Clé de dédoublonnage : le binôme (artiste principal, titre normalisé).
+    Seul le premier artiste crédité compte : Spotify ajoute ou retire les
+    invités d'une version à l'autre (« Lady Gaga » / « Lady Gaga, Bradley
+    Cooper »). « Toto - Africa » et sa reprise « Weezer - Africa » restent
+    deux morceaux distincts.
+    """
+    return _simplify(artist), normalize_title(title)
+
+
+def merge_tracks(sources: list[list[tuple[str, str, str]]]) -> tuple[list[str], int]:
+    """
+    Fusionne les morceaux de plusieurs playlists, (libellé, artiste principal,
+    titre) chacun. Un morceau déjà vu (même artiste et même titre, cf.
+    track_key) n'est gardé qu'une fois : la première occurrence l'emporte,
+    dans l'ordre des playlists.
     Renvoie (libellés retenus, nombre de doublons écartés).
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     merged: list[str] = []
     duplicates = 0
     for source in sources:
-        for label, title in source:
-            key = normalize_title(title)
+        for label, artist, title in source:
+            key = track_key(artist, title)
             if key in seen:
                 duplicates += 1
                 continue
@@ -314,8 +326,8 @@ def build_requests_session():
 
 
 def read_playlist(sp, playlist_id: str, me: dict | None,
-                  access_hint: str) -> tuple[str, list[tuple[str, str]]]:
-    """Lit une playlist : (nom, [(« Artiste - Titre », titre), …])."""
+                  access_hint: str) -> tuple[str, list[tuple[str, str, str]]]:
+    """Lit une playlist : (nom, [(« Artiste - Titre », artiste principal, titre), …])."""
     meta = sp.playlist(playlist_id)
     name = meta.get("name") or playlist_id
 
@@ -330,7 +342,7 @@ def read_playlist(sp, playlist_id: str, me: dict | None,
     if page is None or "items" not in page:
         fail(f"Spotify n'a pas renvoyé le contenu de « {name} ». {access_hint}")
 
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, str]] = []
     while page:
         for entry in page.get("items", []):
             # « item » (nommage depuis 2026) ou « track » (historique).
@@ -338,9 +350,10 @@ def read_playlist(sp, playlist_id: str, me: dict | None,
             # On ignore les entrées vides, locales ou les épisodes de podcast.
             if not track or track.get("type") != "track" or not track.get("name"):
                 continue
-            artists = ", ".join(a["name"] for a in track.get("artists", []) if a.get("name"))
+            names = [a["name"] for a in track.get("artists", []) if a.get("name")]
+            artists = ", ".join(names)
             label = f"{artists} - {track['name']}" if artists else track["name"]
-            entries.append((label, track["name"]))
+            entries.append((label, names[0] if names else "", track["name"]))
         page = sp.next(page) if page.get("next") else None
     return name, entries
 
@@ -364,7 +377,7 @@ def fetch_playlists_tracks(args: argparse.Namespace) -> tuple[list[str], list[st
                    "dans une playlist à vous.")
 
     names: list[str] = []
-    sources: list[list[tuple[str, str]]] = []
+    sources: list[list[tuple[str, str, str]]] = []
     current = playlist_ids[0]  # playlist en cours, pour situer une erreur
     try:
         me = None
@@ -408,7 +421,7 @@ def fetch_playlists_tracks(args: argparse.Namespace) -> tuple[list[str], list[st
 
     tracks, duplicates = merge_tracks(sources)
     if duplicates:
-        print(f"   {duplicates} doublon(s) écarté(s) (même titre, toutes playlists confondues).")
+        print(f"   {duplicates} doublon(s) écarté(s) (même artiste et même titre, toutes playlists confondues).")
     return names, tracks
 
 
