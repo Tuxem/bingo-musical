@@ -4,7 +4,7 @@ Générateur de grilles de BINGO MUSICAL à partir d'une playlist Spotify.
 
 Produit :
   1. un PDF multipage prêt à imprimer (une grille unique par page) ;
-  2. un conducteur .txt pour l'animateur (tous les morceaux, ordre mélangé).
+  2. un conducteur .csv pour l'animateur (tous les morceaux, ordre mélangé).
 
 Exemple (une ou plusieurs playlists, mélangées en un seul répertoire) :
     python bingo_musical.py \
@@ -29,6 +29,7 @@ Dépendances : pip install spotipy reportlab
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import date
 import math
 import os
@@ -123,8 +124,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Options supplémentaires (facultatives)
     parser.add_argument("--output", default="bingo_grilles.pdf",
                         help="Nom du PDF (créé dans export/, préfixé). Défaut : bingo_grilles.pdf")
-    parser.add_argument("--conductor", default="conducteur_animateur.txt",
-                        help="Nom du conducteur (créé dans export/, préfixé). Défaut : conducteur_animateur.txt")
+    parser.add_argument("--conductor", default="conducteur_animateur.csv",
+                        help="Nom du conducteur (créé dans export/, préfixé). Défaut : conducteur_animateur.csv")
     parser.add_argument("--seed", type=int, default=None,
                         help="Graine aléatoire (pour reproduire exactement un tirage).")
     parser.add_argument("--prefixe", default=None,
@@ -694,23 +695,92 @@ def build_pdf(grids, grid_size: int, pdf_path: Path, pdf_title: str | None = Non
 # 4. Conducteur animateur
 # --------------------------------------------------------------------------- #
 
+# Façons de gagner : (en-tête court, libellé).
+WIN_PATTERNS = [
+    ("1H", "1 ligne horizontale"),
+    ("1V", "1 ligne verticale"),
+    ("1D", "1 ligne diagonale"),
+    ("2LH", "2 lignes horizontales"),
+    ("2LV", "2 lignes verticales"),
+    ("2LVH", "1 ligne verticale + 1 ligne horizontale"),
+    ("4B", "4 lignes du bord"),
+    ("FULL", "grille pleine (full)"),
+]
+
+
+def winning_patterns(grid: list[list[str | None]], played: set[str]) -> set[str]:
+    """Façons de gagner (clés de WIN_PATTERNS) réalisées par `grid` avec les morceaux joués."""
+    size = len(grid)
+    marked = [[cell is None or cell in played for cell in row] for row in grid]
+    rows = sum(all(row) for row in marked)
+    cols = sum(all(marked[r][c] for r in range(size)) for c in range(size))
+    diags = (all(marked[i][i] for i in range(size))
+             + all(marked[i][size - 1 - i] for i in range(size)))
+    border = (all(marked[0]) and all(marked[-1])
+              and all(marked[r][0] and marked[r][-1] for r in range(size)))
+    won = set()
+    if rows >= 1:
+        won.add("1H")
+    if cols >= 1:
+        won.add("1V")
+    if diags >= 1:
+        won.add("1D")
+    if rows >= 2:
+        won.add("2LH")
+    if cols >= 2:
+        won.add("2LV")
+    if rows >= 1 and cols >= 1:
+        won.add("2LVH")
+    if border:
+        won.add("4B")
+    if all(all(row) for row in marked):
+        won.add("FULL")
+    return won
+
+
+def first_winners(order: list[str], grids: list[list[list[str | None]]]) -> list[dict[str, list[int]]]:
+    """
+    Pour chaque morceau de `order`, les planches (numéros à partir de 1) qui
+    réalisent une façon de gagner pour la première fois à ce morceau.
+    """
+    achieved: list[set[str]] = [set() for _ in grids]
+    played: set[str] = set()
+    result = []
+    for track in order:
+        played.add(track)
+        wins: dict[str, list[int]] = {}
+        for number, grid in enumerate(grids, start=1):
+            new = winning_patterns(grid, played) - achieved[number - 1]
+            achieved[number - 1] |= new
+            for key in new:
+                wins.setdefault(key, []).append(number)
+        result.append(wins)
+    return result
+
+
 def write_conductor(tracks: list[str], output: Path, playlist_names: list[str],
-                    rng: random.Random) -> None:
+                    rng: random.Random,
+                    grids: list[list[list[str | None]]] | None = None) -> None:
+    """
+    Écrit le conducteur au format CSV (séparateur « ; », UTF-8 avec BOM : s'ouvre
+    directement dans Excel / LibreOffice). Une ligne par morceau, dans l'ordre de jeu.
+    """
     order = tracks[:]
     rng.shuffle(order)
-    width = len(str(len(order)))
-    lines = [
-        "=" * 60,
-        "  BINGO MUSICAL — CONDUCTEUR ANIMATEUR",
-        *(f"  Playlist : {name}" for name in playlist_names),
-        f"  {len(order)} morceaux — généré le {datetime.now():%d/%m/%Y à %H:%M}",
-        "=" * 60,
-        "",
-        "Jouez les morceaux dans cet ordre et cochez au fur et à mesure.",
-        "",
-    ]
-    lines += [f"[ ] {i:>{width}}. {track}" for i, track in enumerate(order, start=1)]
-    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    wins = first_winners(order, grids) if grids else [{} for _ in order]
+
+    header = ["Fait", "N°", "Morceau"]
+    if grids:
+        header += [f"{key} — {label}" for key, label in WIN_PATTERNS]
+    with output.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(header)
+        for i, track in enumerate(order, start=1):
+            row = ["", i, track]
+            if grids:
+                row += [", ".join(map(str, wins[i - 1].get(key, [])))
+                        for key, _ in WIN_PATTERNS]
+            writer.writerow(row)
 
 
 # --------------------------------------------------------------------------- #
@@ -775,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
 
     conductor_path = export_dir / f"{prefix}_{Path(args.conductor).name}"
     try:
-        write_conductor(tracks, conductor_path, playlist_names, rng)
+        write_conductor(tracks, conductor_path, playlist_names, rng, grids)
     except OSError as exc:
         fail(f"impossible d'écrire le conducteur {conductor_path} : {exc}")
     print(f"📝 Conducteur : {conductor_path.resolve()}")

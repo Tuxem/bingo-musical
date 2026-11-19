@@ -5,8 +5,10 @@ plusieurs playlists Spotify, mélangées en un seul répertoire :
 
 - un **PDF multipage** (A4, une grille unique par page, case centrale
   « ★ FREE ★ » si la taille est impaire) ;
-- un **conducteur animateur** (`.txt`) : tous les morceaux de la playlist dans
-  un ordre mélangé, à cocher au fil de la soirée.
+- un **conducteur animateur** (`.csv`, séparateur `;`, à ouvrir dans Excel ou LibreOffice) : tous les morceaux de la playlist dans
+  un ordre mélangé, à cocher au fil de la soirée, avec en face de chaque titre
+  les numéros des planches qui gagnent à ce morceau, par façon de gagner
+  (1H, 1V, 1D, 2LH, 2LV, 2LVH, 4 lignes du bord, full).
 
 ## Installation
 
@@ -107,7 +109,7 @@ python bingo_musical.py \
 | `--token_cache` | non | `~/.cache/bingo_musical/spotify_token.json` | Cache du jeton utilisateur |
 | `--no_browser` | non | — | Autorisation par copier-coller d'URL |
 | `--output` | non | `bingo_grilles.pdf` | Nom du PDF, créé dans `export/` avec le préfixe |
-| `--conductor` | non | `conducteur_animateur.txt` | Nom du conducteur, créé dans `export/` avec le préfixe |
+| `--conductor` | non | `conducteur_animateur.csv` | Nom du conducteur, créé dans `export/` avec le préfixe |
 | `--prefixe` | non | date du jour (`AAAA-MM-JJ`) | Préfixe des fichiers générés |
 | `--seed` | non | aléatoire | Graine pour reproduire un tirage |
 | `--title` | non | aucun | Titre sous l'en-tête de chaque grille (rien si absent) |
@@ -152,7 +154,7 @@ Une reprise reste donc un morceau à part : « Toto - Africa » et
 « Weezer - Africa », ou « Hello » d'Adele et de Lionel Richie, occupent
 chacun leur case.
 
-Le sous-titre du PDF et l'en-tête du conducteur listent toutes les playlists.
+Le sous-titre du PDF liste toutes les playlists.
 
 ## Règles de génération
 
