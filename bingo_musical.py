@@ -758,6 +758,14 @@ def first_winners(order: list[str], grids: list[list[list[str | None]]]) -> list
     return result
 
 
+def neutralise_formule(valeur: str) -> str:
+    """
+    Empêche l'interprétation d'une cellule comme formule par Excel / LibreOffice
+    (injection CSV) : un titre commençant par = + - @ TAB ou CR est préfixé par une apostrophe.
+    """
+    return "'" + valeur if valeur[:1] in ("=", "+", "-", "@", "\t", "\r") else valeur
+
+
 def write_conductor(tracks: list[str], output: Path, playlist_names: list[str],
                     rng: random.Random,
                     grids: list[list[list[str | None]]] | None = None) -> None:
@@ -776,7 +784,7 @@ def write_conductor(tracks: list[str], output: Path, playlist_names: list[str],
         writer = csv.writer(handle, delimiter=";")
         writer.writerow(header)
         for i, track in enumerate(order, start=1):
-            row = ["", i, track]
+            row = ["", i, neutralise_formule(track)]
             if grids:
                 row += [", ".join(map(str, wins[i - 1].get(key, [])))
                         for key, _ in WIN_PATTERNS]
